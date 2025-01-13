@@ -37,6 +37,8 @@ public:
     QString getFilePathMD5() const;
     QString getRestorePath() const;
     QString getFileContentMD5() const;
+    bool parseMeta(const QString& metaPath);
+    static QString getMetaSrcPath(const QString& path);
     bool makeBackupDirsIfNeeded();
     bool parseMeta();
     bool writeMeta();
@@ -331,7 +333,7 @@ bool BackupPrivate::makeBackupDirsIfNeeded()
     return true;
 }
 
-bool BackupPrivate::parseMeta()
+bool BackupPrivate::parseMeta(const QString& metaPath)
 {
     mIsUpload = false;
     mVersion = BACKUP_VERSION;
@@ -342,7 +344,8 @@ bool BackupPrivate::parseMeta()
     mFileCtxMD52 = "";
     mFileCtxMD53 = "";
 
-    const auto metaPath = QString("%1/.%2/meta/%3").arg(mMountPoint, BACKUP_STR, mFilePathMD5);
+    RETURN_VAL_IF_FAIL(!mFilePath.isEmpty(), false);
+
     QFile metaFile(metaPath);
     RETURN_VAL_IF_FAIL(metaFile.open(QIODevice::ReadOnly), false);
 
@@ -369,6 +372,34 @@ bool BackupPrivate::parseMeta()
     }
 
     return true;
+}
+
+QString BackupPrivate::getMetaSrcPath(const QString & path)
+{
+    QFile metaFile(path);
+    RETURN_VAL_IF_FAIL(metaFile.open(QIODevice::ReadOnly), "");
+
+    const QString ctx = metaFile.readAll();
+    RETURN_VAL_IF_FAIL(!ctx.isEmpty(), "");
+
+    const auto strArr = ctx.split("{]");
+    RETURN_VAL_IF_FAIL(!strArr.empty(), "");
+
+    const int ver = strArr.at(0).toInt();
+    if (1 == ver) {
+        RETURN_VAL_IF_FAIL(strArr.length() == 10, "");
+
+        return strArr.at(1);
+    }
+
+    return "";
+}
+
+bool BackupPrivate::parseMeta()
+{
+    const auto metaPath = QString("%1/.%2/meta/%3").arg(mMountPoint, BACKUP_STR, mFilePathMD5);
+
+    return parseMeta(metaPath);
 }
 
 bool BackupPrivate::writeMeta()
@@ -517,11 +548,40 @@ bool Backup::restore()
     return true;
 }
 
+QStringList Backup::getAllBackupFiles()
+{
+    QSet<QString> allFiles;
+
+    QStringList mps = BackupPrivate::getAllMountPoints();
+    for (const auto& mp : mps) {
+        QString mpf = QString("%1/.%2/meta").arg(mp, BACKUP_STR);
+        if (QFile::exists(mpf)) {
+            QStringList files;
+            QDir dss(mpf);
+            auto ds = dss.entryList();
+            for (const auto& dd : ds) {
+                if ("." == dd || ".." == dd) {
+                    continue;
+                }
+                QString p = QString("%1/%2").arg(mpf).arg(dd);
+                if (QFile::exists(p)) {
+                    allFiles << BackupPrivate::getMetaSrcPath(p);
+                }
+            }
+        }
+    }
+
+    return allFiles.values();
+}
+
 void Backup::test()
 {
     Q_D(Backup);
 
-    qInfo() << d->getAllMountPoints();
+    qInfo() << BackupPrivate::getAllMountPoints();
+
     qInfo() << "[Backup]: " << backup();
     qInfo() << "[Restore]: " << restore();
+
+    qInfo() << "[Backup Files]: " << getAllBackupFiles();
 }

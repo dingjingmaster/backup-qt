@@ -11,5 +11,11 @@ int main (int argc, char* argv[])
     Backup b("/tmp/file.b");
     b.test();
 
+    Backup c("/tmp/file.c");
+    c.test();
+
+    Backup d("/tmp/file.d");
+    d.test();
+
     return 0;
 }

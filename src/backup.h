@@ -17,6 +17,7 @@ public:
 
     bool backup();
     bool restore();
+    static QStringList getAllBackupFiles();
 
     void test();
 
