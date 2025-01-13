@@ -11,6 +11,7 @@
 #include <QDateTime>
 
 #include <gio/gio.h>
+#include <sys/stat.h>
 
 
 #define BACKUP_VERSION              1
@@ -27,14 +28,20 @@ class BackupPrivate
 public:
     explicit BackupPrivate(Backup* q);
     void setFilePath(const QString& path);
-    QString getMountPoint() const;
     static QStringList getAllMountPoints();
+    static bool doCopy(const QString& src, const QString& dst);
+    static void updatePermission(const QString& src, const QString& dst);
+    QString getExtName() const;
+    QString getFileName() const;
+    QString getMountPoint() const;
     QString getFilePathMD5() const;
+    QString getRestorePath() const;
     QString getFileContentMD5() const;
     bool makeBackupDirsIfNeeded();
     bool parseMeta();
     bool writeMeta();
     bool doBackup();
+    bool doRestore();
 
 private:
     bool                    mIsUpload;
@@ -57,6 +64,39 @@ private:
 
     Backup*                 q_ptr;
     Q_DECLARE_PUBLIC(Backup);
+};
+
+static const char* gsFileExt[] = {
+    ".tar.gz",
+    ".tar.xz",
+    ".docx",
+    ".xlsx",
+    ".java",
+    ".pptx",
+    ".bz2",
+    ".cpp",
+    ".dxf",
+    ".doc",
+    ".hpp",
+    ".odp",
+    ".odt",
+    ".ods",
+    ".pdf",
+    ".ppt",
+    ".rar",
+    ".txt",
+    ".tmp",
+    ".wps",
+    ".wps",
+    ".xls",
+    ".zip",
+    ".bz",
+    ".cc",
+    ".py",
+    ".xz",
+    ".c",
+    ".h",
+    nullptr,
 };
 
 BackupPrivate::BackupPrivate(Backup* q)
@@ -143,6 +183,59 @@ QStringList BackupPrivate::getAllMountPoints()
     return mountPoints;
 }
 
+bool BackupPrivate::doCopy(const QString & src, const QString & dst)
+{
+    RETURN_VAL_IF_FAIL(QFile::exists(src), false);
+
+    QFile::remove(dst);
+
+    GFile* f1 = g_file_new_for_path(src.toUtf8().constData());
+    GFile* f2 = g_file_new_for_path(dst.toUtf8().constData());
+
+    g_file_copy(f1, f2, (GFileCopyFlags)(G_FILE_COPY_OVERWRITE | G_FILE_COPY_NOFOLLOW_SYMLINKS | G_FILE_COPY_ALL_METADATA), nullptr, nullptr, nullptr, nullptr);
+
+    return QFile::exists(dst);
+}
+
+void BackupPrivate::updatePermission(const QString & src, const QString & dst)
+{
+    RETURN_IF_FAIL(QFile::exists(src));
+
+    struct stat st;
+    if (0 == stat(src.toUtf8().constData(), &st)) {
+        chown(dst.toUtf8().constData(), st.st_uid, st.st_gid);
+        chmod(dst.toUtf8().constData(), st.st_mode);
+    }
+}
+
+QString BackupPrivate::getFileName() const
+{
+    RETURN_VAL_IF_FAIL(!mFilePath.isEmpty(), "");
+
+    QString fileName = mFilePath.split("/").last();
+
+    return fileName;
+}
+
+QString BackupPrivate::getExtName() const
+{
+    RETURN_VAL_IF_FAIL(!mFilePath.isEmpty(), "");
+
+    const QString name = getFileName().toLower();
+    for (int i = 0; gsFileExt[i] != nullptr; i++) {
+        if (name.endsWith(gsFileExt[i])) {
+            return gsFileExt[i];
+        }
+    }
+
+    const auto extStrArr = name.split(".");
+    if (extStrArr.length() > 1) {
+        return QString(".%1").arg(extStrArr.last());
+    }
+
+    return {};
+}
+
 QString BackupPrivate::getFilePathMD5() const
 {
     char* res = nullptr;
@@ -159,6 +252,43 @@ QString BackupPrivate::getFilePathMD5() const
     NOT_NULL_RUN(cs, g_checksum_free);
 
     return res;
+}
+
+QString BackupPrivate::getRestorePath() const
+{
+    RETURN_VAL_IF_FAIL(!mFilePath.isEmpty(), "");
+
+    auto getTimeStr = [=] (quint64 timestamp) -> QString {
+        QDateTime tim = QDateTime::fromMSecsSinceEpoch(timestamp * 1000);
+        return tim.toString("yyyyMMddhhmmss");
+    };
+
+    const QString extName = getExtName();
+    QString restorePath = mFilePath;
+    restorePath.chop(extName.length());
+
+    if (!mFileCtxMD53.isEmpty()) {
+        restorePath.append("-");
+        restorePath.append(getTimeStr(mFileTimestamp3));
+        restorePath.append(extName);
+        return restorePath;
+    }
+
+    if (!mFileCtxMD52.isEmpty()) {
+        restorePath.append("-");
+        restorePath.append(getTimeStr(mFileTimestamp2));
+        restorePath.append(extName);
+        return restorePath;
+    }
+
+    if (!mFileCtxMD51.isEmpty()) {
+        restorePath.append("-");
+        restorePath.append(getTimeStr(mFileTimestamp1));
+        restorePath.append(extName);
+        return restorePath;
+    }
+
+    return {};
 }
 
 QString BackupPrivate::getFileContentMD5() const
@@ -267,7 +397,7 @@ bool BackupPrivate::doBackup()
 
     const auto copyFileAndWriteMeta = [=] (const QString& dstFilePath) ->bool {
         QFile::remove(dstFilePath);
-        bool ret = QFile::copy(mFilePath, dstFilePath);
+        bool ret = doCopy(mFilePath, dstFilePath);
         if (ret) {
             ret = writeMeta();
         }
@@ -313,6 +443,30 @@ bool BackupPrivate::doBackup()
     return copyFileAndWriteMeta(b1);
 }
 
+bool BackupPrivate::doRestore()
+{
+    RETURN_VAL_IF_FAIL(!mFilePath.isEmpty(), false);
+
+    const QString restPath = getRestorePath();
+
+    if (!mFileCtxMD53.isEmpty()) {
+        const auto s1 = QString("%1/.%2/backup/%3-3").arg(mMountPoint, BACKUP_STR, mFilePathMD5);
+        return doCopy(s1, restPath);
+    }
+
+    if (!mFileCtxMD52.isEmpty()) {
+        const auto s2 = QString("%1/.%2/backup/%3-2").arg(mMountPoint, BACKUP_STR, mFilePathMD5);
+        return doCopy(s2, restPath);
+    }
+
+    if (!mFileCtxMD51.isEmpty()) {
+        const auto s2 = QString("%1/.%2/backup/%3-1").arg(mMountPoint, BACKUP_STR, mFilePathMD5);
+        return doCopy(s2, restPath);
+    }
+
+    return false;
+}
+
 Backup::Backup(const QString & filePath, QObject * parent)
     : QObject(parent), d_ptr(new BackupPrivate(this))
 {
@@ -348,7 +502,19 @@ bool Backup::backup()
 
 bool Backup::restore()
 {
-    return false;
+    Q_D(Backup);
+
+    d->mMountPoint = d->getMountPoint();
+    RETURN_VAL_IF_FAIL(!d->mMountPoint.isEmpty(), false);
+
+    d->mFilePathMD5 = d->getFilePathMD5();
+    RETURN_VAL_IF_FAIL(!d->mFilePathMD5.isEmpty(), false);
+
+    RETURN_VAL_IF_FAIL(d->parseMeta(), false);
+
+    RETURN_VAL_IF_FAIL(d->doRestore(), false);
+
+    return true;
 }
 
 void Backup::test()
@@ -357,4 +523,5 @@ void Backup::test()
 
     qInfo() << d->getAllMountPoints();
     qInfo() << "[Backup]: " << backup();
+    qInfo() << "[Restore]: " << restore();
 }
